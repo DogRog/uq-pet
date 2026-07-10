@@ -1,13 +1,17 @@
 """Grid orchestration: (budget x strategy x seed) -> train -> evaluate -> record.
 
-Each run appends one JSON record to results/experiment_runs.jsonl; completed
-cells are skipped on rerun, so the grid is resumable.
+Each run gets its own directory under results/<run_id>/ holding a config.yaml
+snapshot, per-cell records.jsonl, a metrics.json summary, and run.log. Completed
+cells are skipped when resuming a run, so the grid is resumable.
 """
 
 import json
+import logging
+import statistics
 from datetime import datetime, timezone
+from pathlib import Path
 
-from .config import RUNS_PATH, ExperimentConfig
+from .config import RESULTS_DIR, ExperimentConfig, config_to_yaml, load_config
 from .data import sentence_key, split_pool_test
 from .evaluate import evaluate_model_on
 from .llm_scoring import load_cache
@@ -15,22 +19,84 @@ from .selection import select
 from .train import train_token_classifier
 from .uncertainty import METRICS
 
+logger = logging.getLogger("uq_pet")
+
 
 def cell_id(budget: int, strategy: str, seed: int) -> str:
     return f"budget={budget}|strategy={strategy}|seed={seed}"
 
 
-def load_completed_runs() -> dict[str, dict]:
+def create_run_dir(cfg: ExperimentConfig, config_stem: str) -> Path:
+    """Create results/<config_stem>_<timestamp>/ with a config.yaml snapshot."""
+    run_id = f"{config_stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_dir = RESULTS_DIR / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "config.yaml").write_text(config_to_yaml(cfg))
+    return run_dir
+
+
+def resume_run_dir(run_id: str) -> tuple[ExperimentConfig, Path]:
+    """Re-open an existing run; the config comes from its snapshot."""
+    run_dir = RESULTS_DIR / run_id
+    snapshot = run_dir / "config.yaml"
+    if not snapshot.exists():
+        raise FileNotFoundError(f"No config.yaml snapshot in {run_dir}")
+    return load_config(snapshot), run_dir
+
+
+def latest_run_id() -> str | None:
+    """Newest run dir under results/ that has records, by mtime."""
+    candidates = [
+        d for d in RESULTS_DIR.iterdir()
+        if d.is_dir() and (d / "records.jsonl").exists()
+    ] if RESULTS_DIR.exists() else []
+    if not candidates:
+        return None
+    return max(candidates, key=lambda d: (d / "records.jsonl").stat().st_mtime).name
+
+
+def load_completed_runs(records_path: Path) -> dict[str, dict]:
     completed = {}
-    if RUNS_PATH.exists():
-        with open(RUNS_PATH) as f:
+    if records_path.exists():
+        with open(records_path) as f:
             for line in f:
                 record = json.loads(line)
                 completed[cell_id(record["budget_pct"], record["strategy"], record["seed"])] = record
     return completed
 
 
-def run_grid(cfg: ExperimentConfig) -> None:
+def write_metrics_summary(records: list[dict], out_path: Path) -> dict:
+    """Aggregate per-(budget, strategy) mean/std of the headline metrics."""
+    groups: dict[tuple, list[dict]] = {}
+    for r in records:
+        groups.setdefault((r["budget_pct"], r["strategy"]), []).append(r["metrics"])
+
+    def stats(values: list[float]) -> dict:
+        return {
+            "mean": statistics.mean(values),
+            "std": statistics.stdev(values) if len(values) > 1 else 0.0,
+        }
+
+    summary = {
+        "run_id": out_path.parent.name,
+        "n_cells": len(records),
+        "cells": [
+            {
+                "budget_pct": budget,
+                "strategy": strategy,
+                "n_seeds": len(metrics),
+                "entity_f1": stats([m["entity_f1"] for m in metrics]),
+                "token_accuracy": stats([m["token_accuracy"] for m in metrics]),
+            }
+            for (budget, strategy), metrics in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1]))
+        ],
+    }
+    out_path.write_text(json.dumps(summary, indent=2))
+    return summary
+
+
+def run_grid(cfg: ExperimentConfig, run_dir: Path) -> None:
+    records_path = run_dir / "records.jsonl"
     pool, test = split_pool_test(seed=cfg.llm.seed)
     pool_examples = list(pool)
     test_examples = list(test)
@@ -56,8 +122,7 @@ def run_grid(cfg: ExperimentConfig) -> None:
                 k: metric(cache[k]["parsed_samples"]) for k in all_keys
             }
 
-    completed = load_completed_runs()
-    RUNS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    completed = load_completed_runs(records_path)
 
     # Full pool (100%) is strategy-independent: run it once per seed as "full".
     grid = []
@@ -67,12 +132,12 @@ def run_grid(cfg: ExperimentConfig) -> None:
             for seed in range(cfg.repeats):
                 grid.append((budget, strategy, seed))
 
-    print(f"Grid: {len(grid)} cells ({len(completed)} already recorded)")
-    with open(RUNS_PATH, "a") as runs_file:
+    logger.info(f"Grid: {len(grid)} cells ({len(completed)} already recorded)")
+    with open(records_path, "a") as runs_file:
         for i, (budget, strategy, seed) in enumerate(grid, start=1):
             cid = cell_id(budget, strategy, seed)
             if cid in completed:
-                print(f"[{i}/{len(grid)}] skip (done): {cid}")
+                logger.info(f"[{i}/{len(grid)}] skip (done): {cid}")
                 continue
 
             n = round(len(all_keys) * budget / 100)
@@ -85,7 +150,7 @@ def run_grid(cfg: ExperimentConfig) -> None:
                     scores_by_metric.get(metric_name), n, seed,
                 )
 
-            print(f"[{i}/{len(grid)}] {cid} -> {len(selected_keys)} sentences")
+            logger.info(f"[{i}/{len(grid)}] {cid} -> {len(selected_keys)} sentences")
             selected = [by_key[k] for k in selected_keys]
             model, tokenizer = train_token_classifier(selected, cfg.train, seed)
             metrics = evaluate_model_on(model, tokenizer, test_examples, cfg.train)
@@ -112,7 +177,9 @@ def run_grid(cfg: ExperimentConfig) -> None:
             }
             runs_file.write(json.dumps(record) + "\n")
             runs_file.flush()
-            print(f"    entity_f1={metrics['entity_f1']:.4f} "
-                  f"token_acc={metrics['token_accuracy']:.4f}")
+            completed[cid] = record
+            write_metrics_summary(list(completed.values()), run_dir / "metrics.json")
+            logger.info(f"    entity_f1={metrics['entity_f1']:.4f} "
+                        f"token_acc={metrics['token_accuracy']:.4f}")
 
-    print(f"Done. Records in {RUNS_PATH}")
+    logger.info(f"Done. Records in {records_path}")

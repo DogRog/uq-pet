@@ -1,6 +1,6 @@
 """Figures and tables that answer the research question.
 
-Outputs (to results/figures/):
+Outputs (to results/<run_id>/figures/):
 - learning_curves.png     entity-F1 vs budget, one line per strategy, ±std band,
                           dashed full-pool reference
 - summary table (stdout + summary.md)  mean±std F1 per cell + ΔF1 vs random
@@ -11,18 +11,19 @@ Also reports selected-subset mean sentence length per cell (length confound).
 
 import json
 from collections import defaultdict
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import spearmanr
 
-from .config import FIGURES_DIR, RUNS_PATH, ExperimentConfig
+from .config import ExperimentConfig, load_config
 from .llm_scoring import load_cache
 from .uncertainty import METRICS, majority_vote
 
 
-def load_runs() -> list[dict]:
-    with open(RUNS_PATH) as f:
+def load_runs(records_path: Path) -> list[dict]:
+    with open(records_path) as f:
         return [json.loads(line) for line in f]
 
 
@@ -130,26 +131,29 @@ def plot_uncertainty_vs_error(cache: dict[str, dict], out_path) -> dict[str, flo
     return correlations
 
 
-def build_report(cfg: ExperimentConfig | None = None) -> None:
-    cfg = cfg or ExperimentConfig()
-    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+def build_report(run_dir: Path, cfg: ExperimentConfig | None = None) -> None:
+    if cfg is None:
+        snapshot = run_dir / "config.yaml"
+        cfg = load_config(snapshot) if snapshot.exists() else ExperimentConfig()
+    figures_dir = run_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
 
-    runs = load_runs()
-    print(f"Loaded {len(runs)} runs from {RUNS_PATH}\n")
+    runs = load_runs(run_dir / "records.jsonl")
+    print(f"Loaded {len(runs)} runs from {run_dir / 'records.jsonl'}\n")
 
-    plot_learning_curves(runs, FIGURES_DIR / "learning_curves.png")
-    print(f"Wrote {FIGURES_DIR / 'learning_curves.png'}")
+    plot_learning_curves(runs, figures_dir / "learning_curves.png")
+    print(f"Wrote {figures_dir / 'learning_curves.png'}")
 
     table = summary_table(runs)
-    (FIGURES_DIR / "summary.md").write_text(table + "\n")
-    print(f"Wrote {FIGURES_DIR / 'summary.md'}\n")
+    (figures_dir / "summary.md").write_text(table + "\n")
+    print(f"Wrote {figures_dir / 'summary.md'}\n")
     print(table)
 
     cache = load_cache(cfg.llm.cache_path())
     if cache:
         correlations = plot_uncertainty_vs_error(
-            cache, FIGURES_DIR / "uncertainty_vs_error.png"
+            cache, figures_dir / "uncertainty_vs_error.png"
         )
-        print(f"\nWrote {FIGURES_DIR / 'uncertainty_vs_error.png'}")
+        print(f"\nWrote {figures_dir / 'uncertainty_vs_error.png'}")
         print("Spearman(uncertainty, LLM error):",
               {k: round(v, 3) for k, v in correlations.items()})

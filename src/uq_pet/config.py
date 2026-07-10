@@ -1,16 +1,30 @@
-"""Shared constants and experiment configuration dataclasses."""
+"""Shared constants, project paths, and experiment configuration dataclasses."""
 
-from dataclasses import dataclass, field
+import os
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+import yaml
 
 SEED = 3407
 TEST_SIZE = 0.2
 FEW_SHOT_EXAMPLE_INDEX = 12  # index into the pool split used as the prompt example
 
-RESULTS_DIR = Path("results")
-LLM_SCORES_DIR = RESULTS_DIR / "llm_scores"
-RUNS_PATH = RESULTS_DIR / "experiment_runs.jsonl"
-FIGURES_DIR = RESULTS_DIR / "figures"
+
+def project_root() -> Path:
+    """Repo root: $UQ_PET_ROOT if set, else two levels up from src/uq_pet/."""
+    env = os.environ.get("UQ_PET_ROOT")
+    return Path(env).resolve() if env else Path(__file__).resolve().parents[2]
+
+
+PROJECT_ROOT = project_root()
+CONFIGS_DIR = PROJECT_ROOT / "configs"
+DATA_DIR = PROJECT_ROOT / "data"
+RAW_DATA_DIR = DATA_DIR / "raw"
+RAW_DATASET_PATH = RAW_DATA_DIR / "PETv1.1-entities.jsonl"
+PROCESSED_DATA_DIR = DATA_DIR / "processed"
+LLM_SCORES_DIR = PROCESSED_DATA_DIR / "llm_scores"
+RESULTS_DIR = PROJECT_ROOT / "results"
 
 NER_DATASET_URL = (
     "https://raw.githubusercontent.com/patriziobellan86/PETv1.1/master/"
@@ -86,3 +100,16 @@ class ExperimentConfig:
     repeats: int = 5
     llm: LLMScoreConfig = field(default_factory=LLMScoreConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+
+
+def load_config(path: str | Path) -> ExperimentConfig:
+    """Deserialize a YAML file into an ExperimentConfig; unknown keys raise TypeError."""
+    with open(path) as f:
+        raw = yaml.safe_load(f) or {}
+    llm = LLMScoreConfig(**(raw.pop("llm", None) or {}))
+    train = TrainConfig(**(raw.pop("train", None) or {}))
+    return ExperimentConfig(llm=llm, train=train, **raw)
+
+
+def config_to_yaml(cfg: ExperimentConfig) -> str:
+    return yaml.safe_dump(asdict(cfg), sort_keys=False)

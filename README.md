@@ -15,7 +15,7 @@ PET NER dataset
 
 - **Budgets**: N ∈ {10%, 25%, 50%} + a 100% full-pool reference.
 - **Uncertainty metrics** (the metric is itself an experimental variable, see
-  `uq_pet/uncertainty.py`): `sequence_entropy`, `mean_token_entropy`,
+  `src/uq_pet/uncertainty.py`): `sequence_entropy`, `mean_token_entropy`,
   `max_token_entropy`, `variation_ratio`, `jaccard_distance`.
 - **Trained model**: `distilbert-base-cased` token classifier, fixed recipe for
   every cell (the selected data is the only variable), 5 seeds per cell.
@@ -23,41 +23,60 @@ PET NER dataset
 
 ## Running
 
-Requires `OPENROUTER_API_KEY` in `.env`.
+Experiments are defined as YAML files in `configs/` (`grid_full.yaml` is the
+real sweep; `smoke.yaml` is a 2-cell sanity run). LLM scoring requires
+`OPENROUTER_API_KEY` in `.env`.
 
 ```bash
 uv sync
+uv run pytest                     # offline unit tests (metrics, selection, parsing, config)
 
-# 1. LLM sampling over the pool (~1,665 calls; cached + resumable in results/llm_scores/)
-uv run python -m uq_pet.cli score-pool
+# 0. Download the PET dataset → data/raw/
+uv run uq-pet download-data
 
-# 2. Selection → training → evaluation grid (65 runs; resumable via results/experiment_runs.jsonl)
-uv run python -m uq_pet.cli run
+# 1. LLM sampling over the pool (~1,665 calls; cached + resumable in data/processed/llm_scores/)
+uv run uq-pet score-pool --config configs/grid_full.yaml
 
-# 3. Figures + summary table → results/figures/
-uv run python -m uq_pet.cli report
+# 2. Selection → training → evaluation grid (65 cells) → results/<run_id>/
+uv run uq-pet run --config configs/grid_full.yaml
+uv run uq-pet run --resume <run_id>          # continue an interrupted run
+
+# 3. Figures + summary table → results/<run_id>/figures/
+uv run uq-pet report                         # defaults to the latest run
+uv run uq-pet report --run-id <run_id>
 ```
 
-Uncertainty metrics are recomputed from the cached LLM samples, so budgets,
-metrics and repeats can be swept without new API calls.
+The same entry points exist as plain scripts (`uv run python
+scripts/run_experiment.py --config configs/grid_full.yaml`, etc.).
+
+Each run directory `results/<run_id>/` holds a `config.yaml` snapshot,
+per-cell `records.jsonl`, an aggregated `metrics.json`, `run.log`, and the
+report's `figures/`. Uncertainty metrics are recomputed from the cached LLM
+samples, so budgets, metrics and repeats can be swept without new API calls.
 
 ## Layout
 
 | Path | Purpose |
 | ---- | ------- |
-| `uq_pet/config.py` | tags, prompts, paths, experiment dataclasses |
-| `uq_pet/data.py` | PET loading, 80/20 pool/test split (seed 3407) |
-| `uq_pet/llm_scoring.py` | prompt building, sampling, parsing, JSONL cache |
-| `uq_pet/uncertainty.py` | pluggable uncertainty-metric registry |
-| `uq_pet/selection.py` | top-uncertainty / random selection strategies |
-| `uq_pet/train.py`, `uq_pet/evaluate.py` | fine-tuning (manual torch loop, MPS) + seqeval metrics |
-| `uq_pet/experiment.py` | grid orchestration, resumable run log |
-| `uq_pet/reporting.py` | learning curves, summary table, UQ-vs-error diagnostic |
-| `pipeline.ipynb` | end-to-end pipeline walkthrough (cache-aware: reuses `results/` caches) |
+| `configs/` | YAML experiment definitions, one per run/sweep |
+| `data/raw/` | downloaded PET jsonl (gitignored, never edited by hand) |
+| `data/processed/llm_scores/` | cached LLM samples, shared across runs (gitignored) |
+| `src/uq_pet/config.py` | tags, prompts, project paths, config dataclasses + YAML loader |
+| `src/uq_pet/data.py` | PET download/loading, 80/20 pool/test split (seed 3407) |
+| `src/uq_pet/llm_scoring.py` | prompt building, sampling, parsing, JSONL cache |
+| `src/uq_pet/uncertainty.py` | pluggable uncertainty-metric registry |
+| `src/uq_pet/selection.py` | top-uncertainty / random selection strategies |
+| `src/uq_pet/train.py`, `src/uq_pet/evaluate.py` | fine-tuning (manual torch loop, MPS) + seqeval metrics |
+| `src/uq_pet/experiment.py` | grid orchestration, per-run dirs, resumable records |
+| `src/uq_pet/reporting.py` | learning curves, summary table, UQ-vs-error diagnostic |
+| `scripts/` | runnable entry points wrapping the `uq-pet` CLI |
+| `results/<run_id>/` | one directory per run (gitignored) |
+| `notebooks/pipeline.ipynb` | end-to-end walkthrough (cache-aware: reuses the score cache) |
+| `tests/` | offline unit tests |
 
 ## Reading the results
 
-`results/figures/learning_curves.png` is the decision plot: if an uncertainty
+`results/<run_id>/figures/learning_curves.png` is the decision plot: if an uncertainty
 metric's F1-vs-budget curve sits above the random curve beyond the ±std bands
 consistently across budgets, uncertainty selection wins. Check
 `uncertainty_vs_error.png` (does the metric track LLM difficulty at all?) and

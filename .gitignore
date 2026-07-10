@@ -15,4 +15,5 @@ wheels/
 
 .env
 
-/results
+/results/
+/data/

@@ -1,6 +1,6 @@
 """LLM repeated-sampling pass over the experiment pool, with JSONL caching.
 
-Cache format (`results/llm_scores/<model>_k<K>_t<temp>_seed<seed>.jsonl`):
+Cache format (`data/processed/llm_scores/<model>_k<K>_t<temp>_seed<seed>.jsonl`):
 line 0 is a header record describing the config; every other line is one
 sentence record with the raw responses and parsed tag sequences. Metrics are
 never stored — they are recomputed from `parsed_samples`, so budgets, metrics
@@ -24,11 +24,12 @@ from .config import (
     FEW_SHOT_EXAMPLE_INDEX,
     NER_DATASET_URL,
     NER_TAGS,
+    PROJECT_ROOT,
     LLMScoreConfig,
 )
 from .data import sentence_key, tag_ids_to_labels
 
-load_dotenv()
+load_dotenv(PROJECT_ROOT / ".env")
 
 
 def build_ner_prompt(tokens: list, example_tokens: list, example_tags: list) -> str:

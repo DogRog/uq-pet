@@ -1,0 +1,18 @@
+# Tiny smoke run: 2 grid cells, 2 epochs. The llm block must match grid_full's
+# sampling params so cache_path() resolves to the existing score cache and the
+# run needs no OpenRouter calls.
+budgets: [10]
+strategies:
+  - random
+  - uncertainty:mean_token_entropy
+repeats: 1
+
+llm:
+  model: meta-llama/llama-3-8b-instruct
+  num_samples: 5
+  temperature: 0.7
+  seed: 3407
+
+train:
+  checkpoint: distilbert-base-cased
+  epochs: 2
