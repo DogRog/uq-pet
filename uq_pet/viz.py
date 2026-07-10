@@ -63,14 +63,6 @@ def plot_pet_overview(ner, rel, show=True, figsize=(16, 10)):
         max_tag_id = max(tag_counter.keys()) if tag_counter else 0
         ner_tag_names = [f"tag_{i}" for i in range(max_tag_id + 1)]
 
-    # Prepare document and relation summaries
-    doc_names = list(set(ner[:]["document name"]))
-    rel_types = []
-    for entry in rel:
-        for r in entry.get("relations", []):
-            rel_types.append(r.get("relation-type"))
-    rel_counter = Counter(rel_types)
-
     # Create figure with 2x3 layout
     fig, axes = plt.subplots(2, 3, figsize=figsize)
     fig.suptitle("PET Dataset — NER Corpus Overview", fontsize=16, fontweight='bold')
@@ -180,6 +172,4 @@ def plot_ner_heatmap(ner, show=True):
                     aspect='auto',
                     labels=dict(x="NER Tag Type", y="Document", color="Count"))
     fig.update_layout(title="NER Tag Distribution Across Documents (Heatmap)", height=600, width=900)
-    if show:
-        fig.show()
     return fig
