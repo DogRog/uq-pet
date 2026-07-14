@@ -1,10 +1,8 @@
-import math
-
 import pytest
 
 mx = pytest.importorskip("mlx.core")
 
-from uq_pet.mlx_scoring import derive_sample_seed, entropy_bits_from_logprobs
+from uq_pet.mlx_scoring import entropy_bits_from_logprobs
 
 
 def test_entropy_uniform_distribution():
@@ -16,11 +14,3 @@ def test_entropy_uniform_distribution():
 def test_entropy_near_one_hot_is_near_zero():
     probs = mx.array([1.0 - 3e-9, 1e-9, 1e-9, 1e-9])
     assert entropy_bits_from_logprobs(mx.log(probs)) == pytest.approx(0.0, abs=1e-6)
-
-
-def test_derive_sample_seed_stable_and_distinct():
-    seed = derive_sample_seed(3407, "doc-0", 0)
-    assert seed == derive_sample_seed(3407, "doc-0", 0)
-    assert seed != derive_sample_seed(3407, "doc-0", 1)
-    assert seed != derive_sample_seed(3407, "doc-1", 0)
-    assert 0 <= seed < 2**31

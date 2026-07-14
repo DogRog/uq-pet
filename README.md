@@ -29,11 +29,13 @@ PET NER dataset
 ## Running
 
 Experiments are defined as YAML files in `configs/` (`grid_full.yaml` is the
-API sweep; `grid_qwen.yaml` scores with a local Qwen3-8B via mlx and adds the
-white-box strategy; `smoke.yaml` is a 2-cell sanity run). API scoring
-(`llm.backend: openrouter`) requires `OPENROUTER_API_KEY` in `.env`; local
-scoring (`llm.backend: mlx`) needs no key but downloads the model weights on
-first run.
+API sweep; `grid_qwen.yaml` scores with a local Qwen3-4B-4bit via mlx and adds
+the white-box strategy; `grid_cuda.yaml` is its counterpart for a CUDA server,
+scoring Qwen/Qwen3-4B via transformers; `smoke.yaml` is a 2-cell sanity run).
+API scoring (`llm.backend: openrouter`) requires `OPENROUTER_API_KEY` in
+`.env`; local scoring (`llm.backend: mlx` on Apple Silicon, `llm.backend: hf`
+on CUDA/anything) needs no key but downloads the model weights on first run.
+mlx packages only install on macOS, so `uv sync` works on a Linux server too.
 
 ```bash
 uv sync
@@ -54,9 +56,44 @@ uv run uq-pet report                         # defaults to the latest run
 uv run uq-pet report --run-id <run_id>
 ```
 
-`scripts/run_grid_full.sh` and `scripts/run_grid_qwen.sh` chain the full
-pipeline (download → score-pool → run → report) for the respective config,
+`scripts/run_grid_full.sh`, `scripts/run_grid_qwen.sh` and
+`scripts/run_grid_cuda.sh` chain the full pipeline
+(download → score-pool → run → report) for the respective config,
 with a `--resume RUN_ID` passthrough.
+
+### Conda instead of uv
+
+If you prefer conda (e.g. on a managed CUDA server), create the env and
+install the package with pip — the platform markers in `pyproject.toml` handle
+the rest (mlx only on macOS, torch picks the CUDA build on Linux):
+
+```bash
+conda create -n uq-pet python=3.12 -y
+conda activate uq-pet
+pip install -e .              # add: pip install pytest  — to run the tests
+```
+
+Then drop the `uv run` prefix from every command above, e.g.:
+
+```bash
+uq-pet download-data
+uq-pet score-pool --config configs/grid_cuda.yaml
+uq-pet run --config configs/grid_cuda.yaml
+uq-pet report
+```
+
+Note: conda installs won't match `uv.lock` exactly — pip resolves fresh from
+`pyproject.toml`, so use uv when you need the pinned versions.
+
+### Experimenting with the prompt
+
+The NER prompt lives in `prompts/ner_v1.txt` as a `string.Template`
+(placeholders: `$tags`, `$example_tokens`, `$example_output`, `$tokens`). To
+try a variant, copy it to e.g. `prompts/ner_v2.txt`, edit, and set
+`llm.prompt: ner_v2` in the config — each prompt gets its own score cache, so
+variants never clobber each other. Don't edit `ner_v1.txt` in place: its
+rendered text is fingerprinted in the existing cache headers, and a mismatch
+makes `score-pool` refuse the stale cache.
 
 Each run directory `results/<run_id>/` holds a `config.yaml` snapshot,
 per-cell `records.jsonl`, an aggregated `metrics.json`, `run.log`, and the
@@ -68,12 +105,14 @@ samples, so budgets, metrics and repeats can be swept without new API calls.
 | Path | Purpose |
 | ---- | ------- |
 | `configs/` | YAML experiment definitions, one per run/sweep |
+| `prompts/` | NER prompt templates, selected per-config via `llm.prompt` |
 | `data/raw/` | downloaded PET jsonl (gitignored, never edited by hand) |
 | `data/processed/llm_scores/` | cached LLM samples, shared across runs (gitignored) |
 | `src/uq_pet/config.py` | tags, prompts, project paths, config dataclasses + YAML loader |
 | `src/uq_pet/data.py` | PET download/loading, 80/20 pool/test split (seed 3407) |
 | `src/uq_pet/llm_scoring.py` | prompt building, sampling, parsing, JSONL cache |
-| `src/uq_pet/mlx_scoring.py` | in-process mlx backend with per-token entropies (white-box) |
+| `src/uq_pet/mlx_scoring.py` | in-process mlx backend with per-token entropies (Apple Silicon) |
+| `src/uq_pet/hf_scoring.py` | in-process transformers backend with per-token entropies (CUDA) |
 | `src/uq_pet/uncertainty.py` | uncertainty-metric registry + selection strategies |
 | `src/uq_pet/train.py` | fine-tuning (manual torch loop, MPS), prediction, seqeval metrics |
 | `src/uq_pet/experiment.py` | grid orchestration, per-run dirs, resumable records |

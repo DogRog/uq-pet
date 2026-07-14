@@ -10,7 +10,7 @@ Also reports selected-subset mean sentence length per cell (length confound).
 """
 
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -18,6 +18,7 @@ import numpy as np
 from scipy.stats import spearmanr
 
 from .config import ExperimentConfig, load_config
+from .data import tag_ids_to_labels
 from .llm_scoring import load_cache
 from .uncertainty import METRICS, compute_metric, majority_vote, strategy_metric
 
@@ -56,6 +57,75 @@ def plot_ner_heatmap(ner, out_path=None):
     if out_path is not None:
         fig.savefig(out_path, dpi=150)
     return fig
+
+
+def plot_selection_bias(by_key: dict[str, dict], selections: dict[str, list[str]],
+                        out_path=None):
+    """What kind of sentences does each selection pick? Three panels comparing
+    the named key subsets (e.g. pool vs random vs uncertainty): sentence-length
+    distribution, entity density, and entity-type mix. Answers whether an
+    uncertainty metric merely favors long / entity-dense sentences."""
+    def subset_tags(keys):
+        return [tag_ids_to_labels(by_key[k]["ner-tags"]) for k in keys]
+
+    fig, (ax_len, ax_density, ax_types) = plt.subplots(1, 3, figsize=(16, 4.5))
+
+    max_len = max(len(by_key[k]["tokens"]) for keys in selections.values() for k in keys)
+    bins = np.linspace(0, max_len, 25)
+    for name, keys in selections.items():
+        lengths = [len(by_key[k]["tokens"]) for k in keys]
+        ax_len.hist(lengths, bins=bins, density=True, alpha=0.45,
+                    label=f"{name} (mean {np.mean(lengths):.1f})")
+    ax_len.set_xlabel("tokens per sentence")
+    ax_len.set_ylabel("density")
+    ax_len.set_title("Sentence length")
+    ax_len.legend(fontsize=8)
+
+    densities = [
+        np.mean([t != "O" for tags in subset_tags(keys) for t in tags])
+        for keys in selections.values()
+    ]
+    ax_density.bar(range(len(selections)), densities, color="steelblue")
+    ax_density.set_xticks(range(len(selections)), selections, rotation=20, ha="right", fontsize=8)
+    ax_density.set_ylabel("fraction of non-O tokens")
+    ax_density.set_title("Entity density")
+
+    entity_types = sorted({
+        t.removeprefix("B-") for tags in subset_tags(selections[next(iter(selections))])
+        for t in tags if t.startswith("B-")
+    })
+    width = 0.8 / len(selections)
+    for i, (name, keys) in enumerate(selections.items()):
+        counts = Counter(t.removeprefix("B-") for tags in subset_tags(keys)
+                         for t in tags if t.startswith("B-"))
+        total = sum(counts.values())
+        shares = [counts.get(t, 0) / total if total else 0.0 for t in entity_types]
+        ax_types.bar(np.arange(len(entity_types)) + i * width, shares, width, label=name)
+    ax_types.set_xticks(np.arange(len(entity_types)) + 0.4 - width / 2, entity_types,
+                        rotation=30, ha="right", fontsize=8)
+    ax_types.set_ylabel("share of entities")
+    ax_types.set_title("Entity-type mix")
+    ax_types.legend(fontsize=8)
+
+    fig.tight_layout()
+    if out_path is not None:
+        fig.savefig(out_path, dpi=150)
+    return fig
+
+
+def score_length_correlations(cache: dict[str, dict],
+                              scores_by_metric: dict[str, dict[str, float]]) -> dict[str, float]:
+    """Spearman correlation between each metric's scores and sentence length.
+
+    A high ρ means the metric's top-N selection is largely a longest-sentences
+    selection — the length confound the summary table warns about."""
+    correlations = {}
+    for name, scores in scores_by_metric.items():
+        keys = sorted(scores)
+        lengths = [len(cache[k]["tokens"]) for k in keys]
+        rho, _ = spearmanr([scores[k] for k in keys], lengths)
+        correlations[name] = float(rho)
+    return correlations
 
 
 def load_runs(records_path: Path) -> list[dict]:

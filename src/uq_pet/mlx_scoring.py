@@ -6,19 +6,11 @@ per-token predictive entropy (bits) that white-box uncertainty metrics need.
 All mlx imports live in this module so the API path never touches them.
 """
 
-import hashlib
 import math
 
 import mlx.core as mx
 from mlx_lm import load, stream_generate
 from mlx_lm.sample_utils import make_sampler
-
-
-def derive_sample_seed(base_seed: int, key: str, sample_idx: int) -> int:
-    """Deterministic per-(sentence, sample) seed, independent of scoring order
-    so an interrupted+resumed pass reproduces the same draws."""
-    digest = hashlib.sha256(f"{base_seed}:{key}:{sample_idx}".encode()).digest()
-    return int.from_bytes(digest[:4], "big") % (2**31)
 
 
 def entropy_bits_from_logprobs(logprobs: mx.array) -> float:
