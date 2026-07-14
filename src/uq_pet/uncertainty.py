@@ -1,37 +1,40 @@
-"""Pluggable uncertainty metrics computed over repeated LLM samples.
+"""Uncertainty metrics over repeated LLM samples, and the selection strategies
+built on them.
 
-Every metric returns a scalar where higher = more uncertain, but they split by
-what they may observe:
-- black-box metrics take `parsed_samples` — a list of K tag sequences (one per
-  LLM sample) — and measure disagreement between samples;
-- white-box metrics take the full cache record and read the model's internal
-  signal (`token_entropies`, only present in caches from a local backend).
+Every metric returns a scalar where higher = more uncertain. Metrics register
+themselves in METRICS with a box type:
+- "black" metrics measure disagreement between the K parsed tag sequences and
+  work with any backend;
+- "white" metrics read the model's internal signal (`token_entropies`, only
+  present in caches from a local backend).
 
-Metrics register themselves in METRICS with their box type so the experiment
-can treat the metric as a variable (`uncertainty:<name>` strategy strings) and
-`compute_metric` dispatches the right input.
+Registered metrics uniformly take a full cache record (`register` adapts
+black-box functions), so `compute_metric(name, record)` works for any metric.
+Strategy strings are "random", "uncertainty:<metric_name>", or "full".
 """
 
 import math
+import random
 from collections import Counter
 from dataclasses import dataclass
-from typing import Callable, Protocol
-
-from datasets import Dataset
+from typing import Callable
 
 
 @dataclass(frozen=True)
 class Metric:
-    fn: Callable[..., float]
-    box: str  # "black": fn(parsed_samples) | "white": fn(record)
+    fn: Callable[[dict], float]  # cache record -> score
+    box: str  # "black" | "white"
 
 
 METRICS: dict[str, Metric] = {}
 
 
 def register(name: str, box: str = "black"):
+    """Register a metric; black-box functions take `parsed_samples` and are
+    wrapped so every registered fn takes the full cache record."""
     def decorator(fn):
-        METRICS[name] = Metric(fn, box)
+        record_fn = fn if box == "white" else (lambda record: fn(record["parsed_samples"]))
+        METRICS[name] = Metric(record_fn, box)
         return fn
     return decorator
 
@@ -41,13 +44,10 @@ class WhiteboxDataMissingError(ValueError):
 
 
 def compute_metric(name: str, record: dict) -> float:
-    """Score one cache record with a registered metric, black- or white-box."""
+    """Score one cache record with a registered metric."""
     if name not in METRICS:
         raise KeyError(f"Unknown metric '{name}'. Available: {sorted(METRICS)}")
-    metric = METRICS[name]
-    if metric.box == "white":
-        return metric.fn(record)
-    return metric.fn(record["parsed_samples"])
+    return METRICS[name].fn(record)
 
 
 def shannon_entropy(samples: list) -> float:
@@ -144,39 +144,38 @@ def predictive_entropy(record: dict) -> float:
     return sum(per_sample) / len(per_sample) if per_sample else 0.0
 
 
-class UncertaintyScorer(Protocol):
-    """Maps the experiment pool to a per-sentence uncertainty score."""
-
-    def score(self, pool: Dataset) -> dict[str, float]: ...
+# --- selection strategies ---------------------------------------------------
 
 
-class LLMSampleScorer:
-    """Scores sentences from cached LLM samples using a registered metric."""
-
-    def __init__(self, cache: dict[str, dict], metric_name: str):
-        if metric_name not in METRICS:
-            raise KeyError(f"Unknown metric '{metric_name}'. Available: {sorted(METRICS)}")
-        self.cache = cache
-        self.metric_name = metric_name
-
-    def score(self, pool: Dataset) -> dict[str, float]:
-        from .data import sentence_key
-
-        scores = {}
-        for example in pool:
-            key = sentence_key(example)
-            if key not in self.cache:
-                raise KeyError(f"No cached LLM samples for '{key}'; run score-pool first.")
-            scores[key] = compute_metric(self.metric_name, self.cache[key])
-        return scores
+def strategy_metric(strategy: str) -> str | None:
+    """Metric name for an "uncertainty:<name>" strategy, else None."""
+    return strategy.split(":", 1)[1] if strategy.startswith("uncertainty:") else None
 
 
-class ModelScorer:
-    """Stretch goal: score sentences with a trained model's own uncertainty
-    (e.g. logit entropy or MC dropout). Interface placeholder only."""
+def select_top_uncertainty(scores: dict[str, float], n: int, seed: int) -> list[str]:
+    """Top-n keys by uncertainty, most uncertain first.
 
-    def __init__(self, checkpoint: str, **kwargs):
-        raise NotImplementedError("Model-based scoring is not implemented yet.")
+    A seeded shuffle before the stable sort breaks ties randomly but
+    reproducibly (sequence entropy saturates at log2(K), so ties are common).
+    """
+    keys = list(scores)
+    random.Random(seed).shuffle(keys)
+    keys.sort(key=lambda k: scores[k], reverse=True)
+    return keys[:n]
 
-    def score(self, pool: Dataset) -> dict[str, float]:
-        raise NotImplementedError
+
+def select_random(keys: list[str], n: int, seed: int) -> list[str]:
+    return random.Random(seed).sample(list(keys), n)
+
+
+def select(strategy: str, keys: list[str], scores: dict[str, float] | None,
+           n: int, seed: int) -> list[str]:
+    if strategy == "random":
+        return select_random(keys, n, seed)
+    if strategy_metric(strategy) is not None:
+        if scores is None:
+            raise ValueError(f"Strategy '{strategy}' needs uncertainty scores.")
+        # Ties are broken with a fixed seed so the selected subset is identical
+        # across repeats; only the training seed varies for uncertainty cells.
+        return select_top_uncertainty(scores, n, seed=0)
+    raise ValueError(f"Unknown strategy '{strategy}'.")

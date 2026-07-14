@@ -19,17 +19,43 @@ from scipy.stats import spearmanr
 
 from .config import ExperimentConfig, load_config
 from .llm_scoring import load_cache
-from .uncertainty import METRICS, compute_metric, majority_vote
+from .uncertainty import METRICS, compute_metric, majority_vote, strategy_metric
 
 
 def _strategy_label(strategy: str) -> str:
     """Human label with the metric's box type, e.g. 'UQ[white]: predictive_entropy'."""
-    if not strategy.startswith("uncertainty:"):
+    name = strategy_metric(strategy)
+    if name is None:
         return strategy
-    name = strategy.split(":", 1)[1]
     if name in METRICS:
         return f"UQ[{METRICS[name].box}]: {name}"
     return f"UQ: {name}"
+
+
+def plot_ner_heatmap(ner, out_path=None):
+    """Heatmap of entity-tag counts (B-/I- collapsed) per document."""
+    tag_names = ner.features["ner-tags"].feature.names
+    entity_types = sorted({t.removeprefix("B-").removeprefix("I-") for t in tag_names if t != "O"})
+    docs = sorted(set(ner["document name"]))
+    counts = np.zeros((len(docs), len(entity_types)))
+    doc_idx = {d: i for i, d in enumerate(docs)}
+    type_idx = {t: i for i, t in enumerate(entity_types)}
+    for doc, tags in zip(ner["document name"], ner["ner-tags"]):
+        for tid in tags:
+            name = tag_names[tid]
+            if name != "O":
+                counts[doc_idx[doc], type_idx[name.removeprefix("B-").removeprefix("I-")]] += 1
+
+    fig, ax = plt.subplots(figsize=(9, 0.25 * len(docs) + 2))
+    im = ax.imshow(counts, cmap="YlOrRd", aspect="auto")
+    ax.set_xticks(range(len(entity_types)), entity_types, rotation=45, ha="right")
+    ax.set_yticks(range(len(docs)), docs, fontsize=6)
+    ax.set_title("NER tag counts per document")
+    fig.colorbar(im, ax=ax, label="count")
+    fig.tight_layout()
+    if out_path is not None:
+        fig.savefig(out_path, dpi=150)
+    return fig
 
 
 def load_runs(records_path: Path) -> list[dict]:

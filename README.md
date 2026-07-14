@@ -73,11 +73,11 @@ samples, so budgets, metrics and repeats can be swept without new API calls.
 | `src/uq_pet/config.py` | tags, prompts, project paths, config dataclasses + YAML loader |
 | `src/uq_pet/data.py` | PET download/loading, 80/20 pool/test split (seed 3407) |
 | `src/uq_pet/llm_scoring.py` | prompt building, sampling, parsing, JSONL cache |
-| `src/uq_pet/uncertainty.py` | pluggable uncertainty-metric registry |
-| `src/uq_pet/selection.py` | top-uncertainty / random selection strategies |
-| `src/uq_pet/train.py`, `src/uq_pet/evaluate.py` | fine-tuning (manual torch loop, MPS) + seqeval metrics |
+| `src/uq_pet/mlx_scoring.py` | in-process mlx backend with per-token entropies (white-box) |
+| `src/uq_pet/uncertainty.py` | uncertainty-metric registry + selection strategies |
+| `src/uq_pet/train.py` | fine-tuning (manual torch loop, MPS), prediction, seqeval metrics |
 | `src/uq_pet/experiment.py` | grid orchestration, per-run dirs, resumable records |
-| `src/uq_pet/reporting.py` | learning curves, summary table, UQ-vs-error diagnostic |
+| `src/uq_pet/reporting.py` | learning curves, summary table, UQ-vs-error diagnostic, dataset heatmap |
 | `scripts/` | runnable entry points wrapping the `uq-pet` CLI |
 | `results/<run_id>/` | one directory per run (gitignored) |
 | `notebooks/pipeline.ipynb` | end-to-end walkthrough (cache-aware: reuses the score cache) |

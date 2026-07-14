@@ -13,11 +13,9 @@ from pathlib import Path
 
 from .config import RESULTS_DIR, ExperimentConfig, config_to_yaml, load_config
 from .data import sentence_key, split_pool_test
-from .evaluate import evaluate_model_on
 from .llm_scoring import load_cache
-from .selection import select
-from .train import train_token_classifier
-from .uncertainty import METRICS, compute_metric
+from .train import evaluate_model_on, train_token_classifier
+from .uncertainty import METRICS, compute_metric, select, strategy_metric
 
 logger = logging.getLogger("uq_pet")
 
@@ -78,7 +76,7 @@ def write_metrics_summary(records: list[dict], out_path: Path) -> dict:
         }
 
     def box_type(strategy: str) -> str | None:
-        name = strategy.split(":", 1)[1] if ":" in strategy else None
+        name = strategy_metric(strategy)
         return METRICS[name].box if name in METRICS else None
 
     summary = {
@@ -110,7 +108,7 @@ def run_grid(cfg: ExperimentConfig, run_dir: Path) -> None:
 
     # Precompute uncertainty scores per metric from the LLM sample cache.
     metric_names = {
-        s.split(":", 1)[1] for s in cfg.strategies if s.startswith("uncertainty:")
+        name for s in cfg.strategies if (name := strategy_metric(s)) is not None
     }
     scores_by_metric: dict[str, dict[str, float]] = {}
     if metric_names:
@@ -157,10 +155,10 @@ def run_grid(cfg: ExperimentConfig, run_dir: Path) -> None:
                 continue
 
             n = round(len(all_keys) * budget / 100)
+            metric_name = strategy_metric(strategy)
             if strategy == "full":
                 selected_keys = all_keys
             else:
-                metric_name = strategy.split(":", 1)[1] if ":" in strategy else None
                 selected_keys = select(
                     strategy, all_keys,
                     scores_by_metric.get(metric_name), n, seed,
@@ -173,13 +171,12 @@ def run_grid(cfg: ExperimentConfig, run_dir: Path) -> None:
             del model
 
             mean_len = sum(len(by_key[k]["tokens"]) for k in selected_keys) / len(selected_keys)
-            record_metric = strategy.split(":", 1)[1] if ":" in strategy else None
             record = {
                 "budget_pct": budget,
                 "n_selected": len(selected_keys),
                 "strategy": strategy,
-                "metric": record_metric,
-                "box_type": METRICS[record_metric].box if record_metric else None,
+                "metric": metric_name,
+                "box_type": METRICS[metric_name].box if metric_name else None,
                 "seed": seed,
                 "selected_keys": selected_keys,
                 "selected_mean_tokens": mean_len,
