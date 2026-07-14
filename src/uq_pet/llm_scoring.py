@@ -112,6 +112,24 @@ async def get_single_sample(client: AsyncOpenAI, prompt: str, cfg: LLMScoreConfi
     return ""
 
 
+def _sentence_record(example: dict, raw_responses: list[str],
+                     token_entropies: list[list[float]] | None = None) -> dict:
+    """One cache line: the raw LLM responses + parsed tags for one sentence."""
+    tokens = example["tokens"]
+    record = {
+        "key": sentence_key(example),
+        "document": example["document name"],
+        "sentence_id": example["sentence-ID"],
+        "tokens": tokens,
+        "gt_tags": tag_ids_to_labels(example["ner-tags"]),
+        "raw_responses": raw_responses,
+        "parsed_samples": [parse_ner_output(r, tokens) for r in raw_responses],
+    }
+    if token_entropies is not None:
+        record["token_entropies"] = token_entropies
+    return record
+
+
 def load_cache(cache_path: Path, expected_header: dict | None = None) -> dict[str, dict]:
     """Load cached sentence records keyed by sentence key; validate the header."""
     cache = {}
@@ -182,21 +200,12 @@ async def score_pool(cfg: LLMScoreConfig, pool: Dataset, limit: int | None = Non
     # Sentences run concurrently; the semaphore caps total in-flight API calls.
     async def score_sentence(example, f):
         nonlocal done_count
-        tokens = example["tokens"]
-        prompt = build_ner_prompt(tokens, few_shot_tokens, few_shot_tags)
+        prompt = build_ner_prompt(example["tokens"], few_shot_tokens, few_shot_tags)
         raw = await asyncio.gather(*[
             get_single_sample(client, prompt, cfg, semaphore)
             for _ in range(cfg.num_samples)
         ])
-        record = {
-            "key": sentence_key(example),
-            "document": example["document name"],
-            "sentence_id": example["sentence-ID"],
-            "tokens": tokens,
-            "gt_tags": tag_ids_to_labels(example["ner-tags"]),
-            "raw_responses": list(raw),
-            "parsed_samples": [parse_ner_output(r, tokens) for r in raw],
-        }
+        record = _sentence_record(example, list(raw))
         async with write_lock:
             f.write(json.dumps(record) + "\n")
             f.flush()
@@ -218,8 +227,7 @@ def _score_pending_mlx(cfg: LLMScoreConfig, pending: list, few_shot_tokens: list
     generator = MLXGenerator(cfg.model)
     for example in pending:
         key = sentence_key(example)
-        tokens = example["tokens"]
-        prompt = build_ner_prompt(tokens, few_shot_tokens, few_shot_tags)
+        prompt = build_ner_prompt(example["tokens"], few_shot_tokens, few_shot_tags)
         raw, entropies = [], []
         for i in range(cfg.num_samples):
             text, sample_entropies = generator.sample(
@@ -228,16 +236,7 @@ def _score_pending_mlx(cfg: LLMScoreConfig, pending: list, few_shot_tokens: list
             )
             raw.append(text)
             entropies.append(sample_entropies)
-        record = {
-            "key": key,
-            "document": example["document name"],
-            "sentence_id": example["sentence-ID"],
-            "tokens": tokens,
-            "gt_tags": tag_ids_to_labels(example["ner-tags"]),
-            "raw_responses": raw,
-            "parsed_samples": [parse_ner_output(r, tokens) for r in raw],
-            "token_entropies": entropies,
-        }
+        record = _sentence_record(example, raw, entropies)
         f.write(json.dumps(record) + "\n")
         f.flush()
         cache[key] = record
