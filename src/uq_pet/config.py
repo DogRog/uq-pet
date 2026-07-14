@@ -57,8 +57,15 @@ DATASET_RULES = """\
 
 @dataclass
 class LLMScoreConfig:
-    """Configuration for the LLM repeated-sampling pass over the pool."""
+    """Configuration for the LLM repeated-sampling pass over the pool.
 
+    `backend` picks how samples are generated: "openrouter" calls the API
+    (text only, black-box metrics), "mlx" runs the model in-process on Apple
+    Silicon and also records per-token predictive entropies (white-box
+    metrics). `max_concurrency`/`max_retries` only apply to "openrouter".
+    """
+
+    backend: str = "openrouter"
     model: str = "meta-llama/llama-3-8b-instruct"
     num_samples: int = 5
     temperature: float = 0.7
@@ -66,6 +73,10 @@ class LLMScoreConfig:
     seed: int = SEED
     max_concurrency: int = 8
     max_retries: int = 3
+
+    def __post_init__(self):
+        if self.backend not in ("openrouter", "mlx"):
+            raise ValueError(f"Unknown llm.backend '{self.backend}' (expected 'openrouter' or 'mlx')")
 
     def cache_path(self) -> Path:
         safe_model = self.model.replace("/", "_")

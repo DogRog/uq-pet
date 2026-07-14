@@ -15,8 +15,13 @@ PET NER dataset
 
 - **Budgets**: N ∈ {10%, 25%, 50%} + a 100% full-pool reference.
 - **Uncertainty metrics** (the metric is itself an experimental variable, see
-  `src/uq_pet/uncertainty.py`): `sequence_entropy`, `mean_token_entropy`,
-  `max_token_entropy`, `variation_ratio`, `jaccard_distance`.
+  `src/uq_pet/uncertainty.py`). Two families:
+  - *black-box* — disagreement between the K sampled tag sequences, works with
+    any API backend: `sequence_entropy`, `mean_token_entropy`,
+    `max_token_entropy`, `variation_ratio`, `jaccard_distance`;
+  - *white-box* — the model's own per-token predictive entropy, needs the
+    in-process mlx backend which caches `token_entropies`:
+    `predictive_entropy`.
 - **Trained model**: `distilbert-base-cased` token classifier, fixed recipe for
   every cell (the selected data is the only variable), 5 seeds per cell.
 - **Evaluation**: entity-level micro F1 (seqeval), per-type F1, token accuracy.
@@ -24,8 +29,11 @@ PET NER dataset
 ## Running
 
 Experiments are defined as YAML files in `configs/` (`grid_full.yaml` is the
-real sweep; `smoke.yaml` is a 2-cell sanity run). LLM scoring requires
-`OPENROUTER_API_KEY` in `.env`.
+API sweep; `grid_qwen.yaml` scores with a local Qwen3-8B via mlx and adds the
+white-box strategy; `smoke.yaml` is a 2-cell sanity run). API scoring
+(`llm.backend: openrouter`) requires `OPENROUTER_API_KEY` in `.env`; local
+scoring (`llm.backend: mlx`) needs no key but downloads the model weights on
+first run.
 
 ```bash
 uv sync
@@ -46,8 +54,9 @@ uv run uq-pet report                         # defaults to the latest run
 uv run uq-pet report --run-id <run_id>
 ```
 
-The same entry points exist as plain scripts (`uv run python
-scripts/run_experiment.py --config configs/grid_full.yaml`, etc.).
+`scripts/run_grid_full.sh` and `scripts/run_grid_qwen.sh` chain the full
+pipeline (download → score-pool → run → report) for the respective config,
+with a `--resume RUN_ID` passthrough.
 
 Each run directory `results/<run_id>/` holds a `config.yaml` snapshot,
 per-cell `records.jsonl`, an aggregated `metrics.json`, `run.log`, and the

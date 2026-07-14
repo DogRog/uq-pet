@@ -34,6 +34,15 @@ def test_load_config_unknown_key_raises(tmp_path):
         load_config(path)
 
 
+def test_backend_defaults_to_openrouter():
+    assert LLMScoreConfig().backend == "openrouter"
+
+
+def test_unknown_backend_raises():
+    with pytest.raises(ValueError):
+        LLMScoreConfig(backend="bogus")
+
+
 def test_cache_path_under_processed_llm_scores():
     path = LLMScoreConfig().cache_path()
     assert path.parts[-3:-1] == ("processed", "llm_scores")

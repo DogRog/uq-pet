@@ -1,11 +1,16 @@
 import math
 
+import pytest
+
 from uq_pet.uncertainty import (
     METRICS,
+    WhiteboxDataMissingError,
+    compute_metric,
     jaccard_distance,
     majority_vote,
     max_token_entropy,
     mean_token_entropy,
+    predictive_entropy,
     sequence_entropy,
     shannon_entropy,
     variation_ratio,
@@ -65,11 +70,38 @@ def test_majority_vote():
     assert majority_vote([]) == []
 
 
-def test_metrics_registry_contains_all_five():
+def test_metrics_registry_names_and_box_types():
     assert set(METRICS) == {
         "sequence_entropy",
         "mean_token_entropy",
         "max_token_entropy",
         "variation_ratio",
         "jaccard_distance",
+        "predictive_entropy",
     }
+    assert METRICS["predictive_entropy"].box == "white"
+    black = set(METRICS) - {"predictive_entropy"}
+    assert all(METRICS[name].box == "black" for name in black)
+
+
+def test_predictive_entropy_means_over_tokens_then_samples():
+    record = {"token_entropies": [[1.0, 3.0], [2.0, 2.0]]}
+    assert predictive_entropy(record) == 2.0
+
+
+def test_predictive_entropy_missing_data_raises():
+    with pytest.raises(WhiteboxDataMissingError):
+        predictive_entropy({"key": "doc-0", "parsed_samples": [["O"]]})
+    with pytest.raises(WhiteboxDataMissingError):
+        predictive_entropy({"token_entropies": []})
+
+
+def test_compute_metric_dispatches_by_box_type():
+    record = {
+        "parsed_samples": [["O", "B-Actor"], ["O", "I-Actor"]],
+        "token_entropies": [[1.0], [3.0]],
+    }
+    assert compute_metric("mean_token_entropy", record) == 0.5
+    assert compute_metric("predictive_entropy", record) == 2.0
+    with pytest.raises(KeyError):
+        compute_metric("nope", record)
