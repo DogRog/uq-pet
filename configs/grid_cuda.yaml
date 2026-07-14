@@ -1,0 +1,30 @@
+# Local white-box grid for a CUDA server: Qwen3-4B via in-process transformers.
+# The hf backend caches per-token predictive entropies, enabling the white-box
+# uncertainty:predictive_entropy strategy alongside the black-box ones.
+# Same model family/size as grid_qwen.yaml (mlx), so results are comparable.
+budgets: [10, 25, 50, 100]
+strategies:
+  - random
+  - uncertainty:mean_token_entropy      # black-box baseline
+  - uncertainty:sequence_entropy        # black-box baseline
+  - uncertainty:predictive_entropy      # white-box (needs a local-backend cache)
+repeats: 5
+
+llm:
+  backend: hf
+  model: Qwen/Qwen3-4B
+  num_samples: 5
+  temperature: 0.7
+  # Longest completion in the Qwen3-8B mlx cache (same prompt) is 612 tokens;
+  # a lower cap bounds how far a rambling sample drags out its whole batch.
+  max_tokens: 1024
+  seed: 3407
+
+train:
+  checkpoint: distilbert-base-cased
+  epochs: 20
+  batch_size: 8
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  warmup_fraction: 0.1
+  max_length: 256

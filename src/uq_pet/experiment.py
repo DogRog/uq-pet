@@ -13,11 +13,9 @@ from pathlib import Path
 
 from .config import RESULTS_DIR, ExperimentConfig, config_to_yaml, load_config
 from .data import sentence_key, split_pool_test
-from .evaluate import evaluate_model_on
 from .llm_scoring import load_cache
-from .selection import select
-from .train import train_token_classifier
-from .uncertainty import METRICS
+from .train import evaluate_model_on, train_token_classifier
+from .uncertainty import METRICS, compute_metric, select, strategy_metric
 
 logger = logging.getLogger("uq_pet")
 
@@ -77,6 +75,10 @@ def write_metrics_summary(records: list[dict], out_path: Path) -> dict:
             "std": statistics.stdev(values) if len(values) > 1 else 0.0,
         }
 
+    def box_type(strategy: str) -> str | None:
+        name = strategy_metric(strategy)
+        return METRICS[name].box if name in METRICS else None
+
     summary = {
         "run_id": out_path.parent.name,
         "n_cells": len(records),
@@ -84,6 +86,7 @@ def write_metrics_summary(records: list[dict], out_path: Path) -> dict:
             {
                 "budget_pct": budget,
                 "strategy": strategy,
+                "box_type": box_type(strategy),
                 "n_seeds": len(metrics),
                 "entity_f1": stats([m["entity_f1"] for m in metrics]),
                 "token_accuracy": stats([m["token_accuracy"] for m in metrics]),
@@ -105,7 +108,7 @@ def run_grid(cfg: ExperimentConfig, run_dir: Path) -> None:
 
     # Precompute uncertainty scores per metric from the LLM sample cache.
     metric_names = {
-        s.split(":", 1)[1] for s in cfg.strategies if s.startswith("uncertainty:")
+        name for s in cfg.strategies if (name := strategy_metric(s)) is not None
     }
     scores_by_metric: dict[str, dict[str, float]] = {}
     if metric_names:
@@ -116,10 +119,21 @@ def run_grid(cfg: ExperimentConfig, run_dir: Path) -> None:
                 f"{len(missing)} pool sentences missing from LLM cache "
                 f"{cfg.llm.cache_path()}; run `score-pool` first."
             )
+        # White-box metrics need model internals in the cache; fail before
+        # any training rather than mid-grid.
+        whitebox = sorted(n for n in metric_names if METRICS[n].box == "white")
+        if whitebox:
+            no_entropy = [k for k in all_keys if not cache[k].get("token_entropies")]
+            if no_entropy:
+                raise RuntimeError(
+                    f"Strategies {whitebox} are white-box but {len(no_entropy)} cached "
+                    f"records in {cfg.llm.cache_path()} have no token_entropies (cache "
+                    "was produced by a black-box API backend). Re-run score-pool with "
+                    "llm.backend: mlx."
+                )
         for name in metric_names:
-            metric = METRICS[name]
             scores_by_metric[name] = {
-                k: metric(cache[k]["parsed_samples"]) for k in all_keys
+                k: compute_metric(name, cache[k]) for k in all_keys
             }
 
     completed = load_completed_runs(records_path)
@@ -141,10 +155,10 @@ def run_grid(cfg: ExperimentConfig, run_dir: Path) -> None:
                 continue
 
             n = round(len(all_keys) * budget / 100)
+            metric_name = strategy_metric(strategy)
             if strategy == "full":
                 selected_keys = all_keys
             else:
-                metric_name = strategy.split(":", 1)[1] if ":" in strategy else None
                 selected_keys = select(
                     strategy, all_keys,
                     scores_by_metric.get(metric_name), n, seed,
@@ -161,13 +175,15 @@ def run_grid(cfg: ExperimentConfig, run_dir: Path) -> None:
                 "budget_pct": budget,
                 "n_selected": len(selected_keys),
                 "strategy": strategy,
-                "metric": strategy.split(":", 1)[1] if ":" in strategy else None,
+                "metric": metric_name,
+                "box_type": METRICS[metric_name].box if metric_name else None,
                 "seed": seed,
                 "selected_keys": selected_keys,
                 "selected_mean_tokens": mean_len,
                 "metrics": metrics,
                 "train_config": vars(cfg.train),
                 "llm_config": {
+                    "backend": cfg.llm.backend,
                     "model": cfg.llm.model,
                     "num_samples": cfg.llm.num_samples,
                     "temperature": cfg.llm.temperature,

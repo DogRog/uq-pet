@@ -2,10 +2,13 @@
 
 Cache format (`data/processed/llm_scores/<model>_k<K>_t<temp>_seed<seed>.jsonl`):
 line 0 is a header record describing the config; every other line is one
-sentence record with the raw responses and parsed tag sequences. Metrics are
-never stored — they are recomputed from `parsed_samples`, so budgets, metrics
-and repeats can be swept without new API calls. Existing keys are skipped on
-rerun, so an interrupted pass resumes where it left off.
+sentence record with the raw responses and parsed tag sequences. Records from
+the "mlx" backend additionally carry `token_entropies` (per-sample lists of
+per-token predictive entropies in bits) for white-box metrics, and the header
+carries `backend: mlx`. Metrics are never stored — they are recomputed from
+the cached fields, so budgets, metrics and repeats can be swept without new
+generation. Existing keys are skipped on rerun, so an interrupted pass resumes
+where it left off.
 """
 
 import asyncio
@@ -13,18 +16,19 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from string import Template
 
 from datasets import Dataset
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 from .config import (
-    DATASET_RULES,
-    ENTITY_DEFINITIONS,
+    DEFAULT_PROMPT,
     FEW_SHOT_EXAMPLE_INDEX,
     NER_DATASET_URL,
     NER_TAGS,
     PROJECT_ROOT,
+    PROMPTS_DIR,
     LLMScoreConfig,
 )
 from .data import sentence_key, tag_ids_to_labels
@@ -32,24 +36,33 @@ from .data import sentence_key, tag_ids_to_labels
 load_dotenv(PROJECT_ROOT / ".env")
 
 
-def build_ner_prompt(tokens: list, example_tokens: list, example_tags: list) -> str:
-    tags_str = ", ".join(f"'{tag}'" for tag in NER_TAGS)
-    example_pairs = [{"token": tok, "tag": tag} for tok, tag in zip(example_tokens, example_tags)]
-    example_output = json.dumps(example_pairs, indent=2)
+def load_prompt_template(prompt: str = DEFAULT_PROMPT) -> Template:
+    """prompts/<prompt>.txt as a string.Template with $tags, $example_tokens,
+    $example_output and $tokens placeholders (re-read on every call so template
+    edits show up immediately, e.g. in a notebook)."""
+    path = PROMPTS_DIR / f"{prompt}.txt"
+    if not path.exists():
+        available = sorted(p.stem for p in PROMPTS_DIR.glob("*.txt"))
+        raise FileNotFoundError(f"No prompt template {path}. Available: {available}")
+    return Template(path.read_text().removesuffix("\n"))
 
-    return (
-        "You are a strict Named Entity Recognition (NER) system for Process Extraction.\n"
-        "Assign exactly one tag to each token in the sentence.\n\n"
-        f"ENTITY DEFINITIONS:\n{ENTITY_DEFINITIONS}\n\n"
-        f"DATASET RULES:\n{DATASET_RULES}\n"
-        f"- Tags available: [{tags_str}]\n\n"
-        "=== EXAMPLE ===\n"
-        f"Tokens: {example_tokens}\n"
-        f"Output:\n{example_output}\n"
-        "=== END OF EXAMPLE ===\n\n"
-        f"Tokens to tag:\n{tokens}\n\n"
-        "Output MUST be a valid JSON array of objects. Do not output anything except the JSON array."
+
+def build_ner_prompt(tokens: list, example_tokens: list, example_tags: list,
+                     prompt: str = DEFAULT_PROMPT) -> str:
+    example_pairs = [{"token": tok, "tag": tag} for tok, tag in zip(example_tokens, example_tags)]
+    return load_prompt_template(prompt).substitute(
+        tags=", ".join(f"'{tag}'" for tag in NER_TAGS),
+        example_tokens=example_tokens,
+        example_output=json.dumps(example_pairs, indent=2),
+        tokens=tokens,
     )
+
+
+def derive_sample_seed(base_seed: int, key: str, sample_idx: int) -> int:
+    """Deterministic per-(sentence, sample) seed, independent of scoring order
+    so an interrupted+resumed pass reproduces the same draws."""
+    digest = hashlib.sha256(f"{base_seed}:{key}:{sample_idx}".encode()).digest()
+    return int.from_bytes(digest[:4], "big") % (2**31)
 
 
 def parse_ner_output(output_str: str, tokens: list) -> list[str]:
@@ -76,9 +89,10 @@ def parse_ner_output(output_str: str, tokens: list) -> list[str]:
     return [tag if tag in NER_TAGS else "O" for tag in extracted_tags]
 
 
-def prompt_fingerprint(few_shot_tokens: list, few_shot_tags: list) -> str:
+def prompt_fingerprint(few_shot_tokens: list, few_shot_tags: list,
+                       prompt: str = DEFAULT_PROMPT) -> str:
     """Hash of the prompt template + few-shot example, to detect stale caches."""
-    template = build_ner_prompt(["<TOKENS>"], few_shot_tokens, few_shot_tags)
+    template = build_ner_prompt(["<TOKENS>"], few_shot_tokens, few_shot_tags, prompt)
     return hashlib.sha256(template.encode()).hexdigest()[:16]
 
 
@@ -107,6 +121,24 @@ async def get_single_sample(client: AsyncOpenAI, prompt: str, cfg: LLMScoreConfi
                     return ""
                 await asyncio.sleep(2 ** attempt)
     return ""
+
+
+def _sentence_record(example: dict, raw_responses: list[str],
+                     token_entropies: list[list[float]] | None = None) -> dict:
+    """One cache line: the raw LLM responses + parsed tags for one sentence."""
+    tokens = example["tokens"]
+    record = {
+        "key": sentence_key(example),
+        "document": example["document name"],
+        "sentence_id": example["sentence-ID"],
+        "tokens": tokens,
+        "gt_tags": tag_ids_to_labels(example["ner-tags"]),
+        "raw_responses": raw_responses,
+        "parsed_samples": [parse_ner_output(r, tokens) for r in raw_responses],
+    }
+    if token_entropies is not None:
+        record["token_entropies"] = token_entropies
+    return record
 
 
 def load_cache(cache_path: Path, expected_header: dict | None = None) -> dict[str, dict]:
@@ -147,9 +179,14 @@ async def score_pool(cfg: LLMScoreConfig, pool: Dataset, limit: int | None = Non
         "num_samples": cfg.num_samples,
         "temperature": cfg.temperature,
         "seed": cfg.seed,
-        "prompt_fingerprint": prompt_fingerprint(few_shot_tokens, few_shot_tags),
+        "prompt_fingerprint": prompt_fingerprint(few_shot_tokens, few_shot_tags, cfg.prompt),
         "dataset_url": NER_DATASET_URL,
     }
+    # Non-default values only, so headers of pre-existing caches keep validating.
+    if cfg.backend != "openrouter":
+        header["backend"] = cfg.backend
+    if cfg.prompt != DEFAULT_PROMPT:
+        header["prompt"] = cfg.prompt
 
     cache_path = cfg.cache_path()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -164,6 +201,17 @@ async def score_pool(cfg: LLMScoreConfig, pool: Dataset, limit: int | None = Non
     pending = [ex for ex in examples if sentence_key(ex) not in cache]
     print(f"Scoring pool: {len(pending)} to score, {len(cache)} cached ({cache_path})")
 
+    if cfg.backend in ("mlx", "hf"):
+        if cfg.backend == "mlx":
+            from .mlx_scoring import MLXGenerator
+            generator = MLXGenerator(cfg.model)
+        else:
+            from .hf_scoring import HFGenerator
+            generator = HFGenerator(cfg.model)
+        with open(cache_path, "a") as f:
+            _score_pending_local(generator, cfg, pending, few_shot_tokens, few_shot_tags, cache, f)
+        return cache
+
     client = make_client()
     semaphore = asyncio.Semaphore(cfg.max_concurrency)
     write_lock = asyncio.Lock()
@@ -172,21 +220,12 @@ async def score_pool(cfg: LLMScoreConfig, pool: Dataset, limit: int | None = Non
     # Sentences run concurrently; the semaphore caps total in-flight API calls.
     async def score_sentence(example, f):
         nonlocal done_count
-        tokens = example["tokens"]
-        prompt = build_ner_prompt(tokens, few_shot_tokens, few_shot_tags)
+        prompt = build_ner_prompt(example["tokens"], few_shot_tokens, few_shot_tags, cfg.prompt)
         raw = await asyncio.gather(*[
             get_single_sample(client, prompt, cfg, semaphore)
             for _ in range(cfg.num_samples)
         ])
-        record = {
-            "key": sentence_key(example),
-            "document": example["document name"],
-            "sentence_id": example["sentence-ID"],
-            "tokens": tokens,
-            "gt_tags": tag_ids_to_labels(example["ner-tags"]),
-            "raw_responses": list(raw),
-            "parsed_samples": [parse_ner_output(r, tokens) for r in raw],
-        }
+        record = _sentence_record(example, list(raw))
         async with write_lock:
             f.write(json.dumps(record) + "\n")
             f.flush()
@@ -198,3 +237,23 @@ async def score_pool(cfg: LLMScoreConfig, pool: Dataset, limit: int | None = Non
         await asyncio.gather(*[score_sentence(ex, f) for ex in pending])
 
     return cache
+
+
+def _score_pending_local(generator, cfg: LLMScoreConfig, pending: list, few_shot_tokens: list,
+                         few_shot_tags: list, cache: dict, f) -> None:
+    """In-process scoring, one sentence at a time.
+
+    `generator` is any backend with a
+    `.sample_batch(prompt, temperature, max_tokens, seeds) -> (texts, entropies)`
+    method; the hf backend decodes all of a sentence's samples as one GPU batch.
+    """
+    for example in pending:
+        key = sentence_key(example)
+        prompt = build_ner_prompt(example["tokens"], few_shot_tokens, few_shot_tags, cfg.prompt)
+        seeds = [derive_sample_seed(cfg.seed, key, i) for i in range(cfg.num_samples)]
+        raw, entropies = generator.sample_batch(prompt, cfg.temperature, cfg.max_tokens, seeds)
+        record = _sentence_record(example, raw, entropies)
+        f.write(json.dumps(record) + "\n")
+        f.flush()
+        cache[key] = record
+        print(f"Scored {len(cache)} total ({key})")

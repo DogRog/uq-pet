@@ -1,6 +1,6 @@
 import pytest
 
-from uq_pet.selection import select, select_random, select_top_uncertainty
+from uq_pet.uncertainty import select, select_random, select_top_uncertainty
 
 KEYS = [f"doc::{i}" for i in range(20)]
 

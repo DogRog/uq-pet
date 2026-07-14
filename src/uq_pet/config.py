@@ -19,6 +19,8 @@ def project_root() -> Path:
 
 PROJECT_ROOT = project_root()
 CONFIGS_DIR = PROJECT_ROOT / "configs"
+PROMPTS_DIR = PROJECT_ROOT / "prompts"
+DEFAULT_PROMPT = "ner_v1"
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 RAW_DATASET_PATH = RAW_DATA_DIR / "PETv1.1-entities.jsonl"
@@ -39,27 +41,22 @@ NER_TAGS = [
     "B-AND Gateway", "I-AND Gateway"
 ]
 
-ENTITY_DEFINITIONS = """\
-- Actor: The person, system, or role performing the action.
-- Activity: The task or action being executed.
-- Activity Data: The object, document, or data manipulated by the activity.
-- Further Specification: Additional context, tools, or locations (e.g., 'via email').
-- XOR Gateway: Words indicating an exclusive branching point (e.g., 'If', 'otherwise').
-- Condition Specification: The condition required to take a branch (e.g., 'the claim is valid').
-- AND Gateway: Words indicating parallel execution (e.g., 'in parallel').
-- O: Tokens outside of any process entity."""
-
-DATASET_RULES = """\
-- Determiners ('The', 'a', 'an') MUST be included in the entity if they precede it.
-- Multi-word entities must start with 'B-' (Beginning) and continue with 'I-' (Inside).
-- Single-word entities get the 'B-' tag."""
-
-
 @dataclass
 class LLMScoreConfig:
-    """Configuration for the LLM repeated-sampling pass over the pool."""
+    """Configuration for the LLM repeated-sampling pass over the pool.
 
+    `backend` picks how samples are generated: "openrouter" calls the API
+    (text only, black-box metrics); "mlx" (Apple Silicon) and "hf"
+    (transformers, CUDA when available) run the model in-process and also
+    record per-token predictive entropies (white-box metrics).
+    `max_concurrency`/`max_retries` only apply to "openrouter".
+    `prompt` names a template in prompts/<name>.txt; each prompt gets its
+    own score cache.
+    """
+
+    backend: str = "openrouter"
     model: str = "meta-llama/llama-3-8b-instruct"
+    prompt: str = DEFAULT_PROMPT
     num_samples: int = 5
     temperature: float = 0.7
     max_tokens: int = 1500
@@ -67,10 +64,20 @@ class LLMScoreConfig:
     max_concurrency: int = 8
     max_retries: int = 3
 
+    def __post_init__(self):
+        if self.backend not in ("openrouter", "mlx", "hf"):
+            raise ValueError(f"Unknown llm.backend '{self.backend}' (expected 'openrouter', 'mlx' or 'hf')")
+
+    def prompt_path(self) -> Path:
+        return PROMPTS_DIR / f"{self.prompt}.txt"
+
     def cache_path(self) -> Path:
         safe_model = self.model.replace("/", "_")
-        name = f"{safe_model}_k{self.num_samples}_t{self.temperature}_seed{self.seed}.jsonl"
-        return LLM_SCORES_DIR / name
+        name = f"{safe_model}_k{self.num_samples}_t{self.temperature}_seed{self.seed}"
+        # The default prompt keeps the historical filename so old caches stay valid.
+        if self.prompt != DEFAULT_PROMPT:
+            name += f"_{self.prompt}"
+        return LLM_SCORES_DIR / f"{name}.jsonl"
 
 
 @dataclass

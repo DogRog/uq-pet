@@ -34,10 +34,37 @@ def test_load_config_unknown_key_raises(tmp_path):
         load_config(path)
 
 
+def test_backend_defaults_to_openrouter():
+    assert LLMScoreConfig().backend == "openrouter"
+
+
+def test_local_backends_accepted():
+    assert LLMScoreConfig(backend="mlx").backend == "mlx"
+    assert LLMScoreConfig(backend="hf").backend == "hf"
+
+
+def test_unknown_backend_raises():
+    with pytest.raises(ValueError):
+        LLMScoreConfig(backend="bogus")
+
+
 def test_cache_path_under_processed_llm_scores():
     path = LLMScoreConfig().cache_path()
     assert path.parts[-3:-1] == ("processed", "llm_scores")
     assert path.name == "meta-llama_llama-3-8b-instruct_k5_t0.7_seed3407.jsonl"
+
+
+def test_custom_prompt_gets_its_own_cache():
+    # Default prompt keeps the historical filename; others are suffixed.
+    path = LLMScoreConfig(prompt="ner_v2").cache_path()
+    assert path.name == "meta-llama_llama-3-8b-instruct_k5_t0.7_seed3407_ner_v2.jsonl"
+
+
+def test_prompt_path_points_into_prompts_dir():
+    path = LLMScoreConfig().prompt_path()
+    assert path.name == "ner_v1.txt"
+    assert path.parent.name == "prompts"
+    assert path.exists()
 
 
 def test_project_root_env_override(monkeypatch, tmp_path):
