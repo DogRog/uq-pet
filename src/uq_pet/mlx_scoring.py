@@ -24,6 +24,13 @@ class MLXGenerator:
     def __init__(self, model_name: str):
         self.model, self.tokenizer = load(model_name)
 
+    def sample_batch(self, prompt: str, temperature: float, max_tokens: int,
+                     seeds: list[int]) -> tuple[list[str], list[list[float]]]:
+        """len(seeds) sampled completions, generated one at a time (mlx-lm has
+        no batched generate); one seed per sample."""
+        results = [self.sample(prompt, temperature, max_tokens, seed) for seed in seeds]
+        return [text for text, _ in results], [entropies for _, entropies in results]
+
     def sample(self, prompt: str, temperature: float, max_tokens: int,
                seed: int) -> tuple[str, list[float]]:
         """One sampled completion; returns (text, per-generated-token entropies)."""
