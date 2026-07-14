@@ -70,7 +70,8 @@ the rest (mlx only on macOS, torch picks the CUDA build on Linux):
 ```bash
 conda create -n uq-pet python=3.12 -y
 conda activate uq-pet
-pip install -e .              # add: pip install pytest  — to run the tests
+pip install --use-pep517 seqeval   # seqeval's legacy setup.py build is broken; force PEP 517
+pip install -e .                   # add: pip install pytest  — to run the tests
 ```
 
 Then drop the `uv run` prefix from every command above, e.g.:
@@ -84,6 +85,13 @@ uq-pet report
 
 Note: conda installs won't match `uv.lock` exactly — pip resolves fresh from
 `pyproject.toml`, so use uv when you need the pinned versions.
+
+If the env came with torch preinstalled (typical on Jupyter images), pip's
+torch upgrade will strand the old `torchvision`/`torchaudio` builds, and
+transformers then crashes with `operator torchvision::nms does not exist` /
+`Could not import module 'Qwen3ForCausalLM'`. This project needs neither —
+`pip uninstall -y torchvision torchaudio` fixes it. Afterwards confirm the GPU
+is still visible: `python -c "import torch; print(torch.cuda.is_available())"`.
 
 ### Experimenting with the prompt
 

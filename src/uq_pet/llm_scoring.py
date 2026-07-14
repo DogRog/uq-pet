@@ -241,22 +241,17 @@ async def score_pool(cfg: LLMScoreConfig, pool: Dataset, limit: int | None = Non
 
 def _score_pending_local(generator, cfg: LLMScoreConfig, pending: list, few_shot_tokens: list,
                          few_shot_tags: list, cache: dict, f) -> None:
-    """Sequential in-process scoring (single GPU — no concurrency to exploit).
+    """In-process scoring, one sentence at a time.
 
     `generator` is any backend with a
-    `.sample(prompt, temperature, max_tokens, seed) -> (text, entropies)` method.
+    `.sample_batch(prompt, temperature, max_tokens, seeds) -> (texts, entropies)`
+    method; the hf backend decodes all of a sentence's samples as one GPU batch.
     """
     for example in pending:
         key = sentence_key(example)
         prompt = build_ner_prompt(example["tokens"], few_shot_tokens, few_shot_tags, cfg.prompt)
-        raw, entropies = [], []
-        for i in range(cfg.num_samples):
-            text, sample_entropies = generator.sample(
-                prompt, cfg.temperature, cfg.max_tokens,
-                seed=derive_sample_seed(cfg.seed, key, i),
-            )
-            raw.append(text)
-            entropies.append(sample_entropies)
+        seeds = [derive_sample_seed(cfg.seed, key, i) for i in range(cfg.num_samples)]
+        raw, entropies = generator.sample_batch(prompt, cfg.temperature, cfg.max_tokens, seeds)
         record = _sentence_record(example, raw, entropies)
         f.write(json.dumps(record) + "\n")
         f.flush()
