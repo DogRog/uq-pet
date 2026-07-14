@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# End-to-end pipeline for the local Qwen grid (configs/grid_qwen.yaml):
-#   download data -> in-process mlx scoring -> selection/training grid -> report.
+# End-to-end pipeline for the CUDA-server grid (configs/grid_cuda.yaml):
+#   download data -> in-process hf/transformers scoring -> selection/training grid -> report.
 #
-# No API key needed: the model runs locally via mlx_lm. The first run downloads
-# ~2.3 GB of Qwen3-4B-4bit weights from Hugging Face. The scoring pass is long
-# (~8,000 generations) but Ctrl-C-safe: it resumes from the cache.
+# No API key needed: the model runs locally via transformers on CUDA (falls
+# back to MPS/CPU). The first run downloads ~8 GB of Qwen3-4B weights from
+# Hugging Face. The scoring pass is long (~8,000 generations) but
+# Ctrl-C-safe: it resumes from the cache.
 #
 # Usage:
-#   scripts/run_grid_qwen.sh                 # start a new run
-#   scripts/run_grid_qwen.sh --resume RUN_ID # continue an interrupted run
+#   scripts/run_grid_cuda.sh                 # start a new run
+#   scripts/run_grid_cuda.sh --resume RUN_ID # continue an interrupted run
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-CONFIG=configs/grid_qwen.yaml
+CONFIG=configs/grid_cuda.yaml
 
 RESUME=""
 if [[ "${1:-}" == "--resume" ]]; then
