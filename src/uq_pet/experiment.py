@@ -17,7 +17,7 @@ from .evaluate import evaluate_model_on
 from .llm_scoring import load_cache
 from .selection import select
 from .train import train_token_classifier
-from .uncertainty import METRICS
+from .uncertainty import METRICS, compute_metric
 
 logger = logging.getLogger("uq_pet")
 
@@ -77,6 +77,10 @@ def write_metrics_summary(records: list[dict], out_path: Path) -> dict:
             "std": statistics.stdev(values) if len(values) > 1 else 0.0,
         }
 
+    def box_type(strategy: str) -> str | None:
+        name = strategy.split(":", 1)[1] if ":" in strategy else None
+        return METRICS[name].box if name in METRICS else None
+
     summary = {
         "run_id": out_path.parent.name,
         "n_cells": len(records),
@@ -84,6 +88,7 @@ def write_metrics_summary(records: list[dict], out_path: Path) -> dict:
             {
                 "budget_pct": budget,
                 "strategy": strategy,
+                "box_type": box_type(strategy),
                 "n_seeds": len(metrics),
                 "entity_f1": stats([m["entity_f1"] for m in metrics]),
                 "token_accuracy": stats([m["token_accuracy"] for m in metrics]),
@@ -116,10 +121,21 @@ def run_grid(cfg: ExperimentConfig, run_dir: Path) -> None:
                 f"{len(missing)} pool sentences missing from LLM cache "
                 f"{cfg.llm.cache_path()}; run `score-pool` first."
             )
+        # White-box metrics need model internals in the cache; fail before
+        # any training rather than mid-grid.
+        whitebox = sorted(n for n in metric_names if METRICS[n].box == "white")
+        if whitebox:
+            no_entropy = [k for k in all_keys if not cache[k].get("token_entropies")]
+            if no_entropy:
+                raise RuntimeError(
+                    f"Strategies {whitebox} are white-box but {len(no_entropy)} cached "
+                    f"records in {cfg.llm.cache_path()} have no token_entropies (cache "
+                    "was produced by a black-box API backend). Re-run score-pool with "
+                    "llm.backend: mlx."
+                )
         for name in metric_names:
-            metric = METRICS[name]
             scores_by_metric[name] = {
-                k: metric(cache[k]["parsed_samples"]) for k in all_keys
+                k: compute_metric(name, cache[k]) for k in all_keys
             }
 
     completed = load_completed_runs(records_path)
@@ -157,17 +173,20 @@ def run_grid(cfg: ExperimentConfig, run_dir: Path) -> None:
             del model
 
             mean_len = sum(len(by_key[k]["tokens"]) for k in selected_keys) / len(selected_keys)
+            record_metric = strategy.split(":", 1)[1] if ":" in strategy else None
             record = {
                 "budget_pct": budget,
                 "n_selected": len(selected_keys),
                 "strategy": strategy,
-                "metric": strategy.split(":", 1)[1] if ":" in strategy else None,
+                "metric": record_metric,
+                "box_type": METRICS[record_metric].box if record_metric else None,
                 "seed": seed,
                 "selected_keys": selected_keys,
                 "selected_mean_tokens": mean_len,
                 "metrics": metrics,
                 "train_config": vars(cfg.train),
                 "llm_config": {
+                    "backend": cfg.llm.backend,
                     "model": cfg.llm.model,
                     "num_samples": cfg.llm.num_samples,
                     "temperature": cfg.llm.temperature,

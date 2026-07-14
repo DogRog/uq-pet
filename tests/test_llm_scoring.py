@@ -1,6 +1,14 @@
 import json
 
-from uq_pet.llm_scoring import build_ner_prompt, parse_ner_output, prompt_fingerprint
+import pytest
+
+from uq_pet.llm_scoring import (
+    build_ner_prompt,
+    load_cache,
+    parse_ner_output,
+    prompt_fingerprint,
+)
+from uq_pet.uncertainty import WhiteboxDataMissingError, compute_metric
 
 TOKENS = ["The", "clerk", "checks", "the", "form"]
 
@@ -52,3 +60,23 @@ def test_prompt_fingerprint_stable_and_sensitive():
     fp = prompt_fingerprint(["Alice"], ["B-Actor"])
     assert fp == prompt_fingerprint(["Alice"], ["B-Actor"])
     assert fp != prompt_fingerprint(["Bob"], ["B-Actor"])
+
+
+def test_old_cache_without_entropies_still_loads(tmp_path):
+    # Pre-mlx cache format: no `backend` in the header, no `token_entropies`
+    # in records. Must keep loading, and black-box metrics must keep working.
+    header = {"model": "meta-llama/llama-3-8b-instruct", "num_samples": 2}
+    record = {
+        "key": "doc-0",
+        "tokens": TOKENS,
+        "gt_tags": ["O"] * len(TOKENS),
+        "raw_responses": ["", ""],
+        "parsed_samples": [["O"] * len(TOKENS), ["B-Actor"] + ["O"] * 4],
+    }
+    path = tmp_path / "old_cache.jsonl"
+    path.write_text(json.dumps({"header": header}) + "\n" + json.dumps(record) + "\n")
+
+    cache = load_cache(path, expected_header=header)
+    assert compute_metric("mean_token_entropy", cache["doc-0"]) == pytest.approx(0.2)
+    with pytest.raises(WhiteboxDataMissingError):
+        compute_metric("predictive_entropy", cache["doc-0"])

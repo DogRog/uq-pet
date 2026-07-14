@@ -1,25 +1,53 @@
 """Pluggable uncertainty metrics computed over repeated LLM samples.
 
-Each metric takes `parsed_samples` — a list of K tag sequences (one per LLM
-sample, all the same length) — and returns a scalar where higher = more
-uncertain. Metrics register themselves in METRICS so the experiment can treat
-the metric as a variable (`uncertainty:<name>` strategy strings).
+Every metric returns a scalar where higher = more uncertain, but they split by
+what they may observe:
+- black-box metrics take `parsed_samples` — a list of K tag sequences (one per
+  LLM sample) — and measure disagreement between samples;
+- white-box metrics take the full cache record and read the model's internal
+  signal (`token_entropies`, only present in caches from a local backend).
+
+Metrics register themselves in METRICS with their box type so the experiment
+can treat the metric as a variable (`uncertainty:<name>` strategy strings) and
+`compute_metric` dispatches the right input.
 """
 
 import math
 from collections import Counter
+from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from datasets import Dataset
 
-METRICS: dict[str, Callable[[list[list[str]]], float]] = {}
+
+@dataclass(frozen=True)
+class Metric:
+    fn: Callable[..., float]
+    box: str  # "black": fn(parsed_samples) | "white": fn(record)
 
 
-def register(name: str):
+METRICS: dict[str, Metric] = {}
+
+
+def register(name: str, box: str = "black"):
     def decorator(fn):
-        METRICS[name] = fn
+        METRICS[name] = Metric(fn, box)
         return fn
     return decorator
+
+
+class WhiteboxDataMissingError(ValueError):
+    """A white-box metric was asked to score a record without model internals."""
+
+
+def compute_metric(name: str, record: dict) -> float:
+    """Score one cache record with a registered metric, black- or white-box."""
+    if name not in METRICS:
+        raise KeyError(f"Unknown metric '{name}'. Available: {sorted(METRICS)}")
+    metric = METRICS[name]
+    if metric.box == "white":
+        return metric.fn(record)
+    return metric.fn(record["parsed_samples"])
 
 
 def shannon_entropy(samples: list) -> float:
@@ -101,6 +129,21 @@ def jaccard_distance(parsed_samples: list[list[str]]) -> float:
     return sum(distances) / len(distances)
 
 
+@register("predictive_entropy", box="white")
+def predictive_entropy(record: dict) -> float:
+    """Mean token predictive entropy (bits) from the model's own per-step
+    distributions: mean over generated tokens per sample, mean over K samples."""
+    token_entropies = record.get("token_entropies")
+    if not token_entropies:
+        raise WhiteboxDataMissingError(
+            f"Record '{record.get('key')}' has no token_entropies; white-box "
+            "metrics need a cache produced by a local backend (llm.backend: mlx). "
+            "Re-run score-pool with an mlx config."
+        )
+    per_sample = [sum(ents) / len(ents) for ents in token_entropies if ents]
+    return sum(per_sample) / len(per_sample) if per_sample else 0.0
+
+
 class UncertaintyScorer(Protocol):
     """Maps the experiment pool to a per-sentence uncertainty score."""
 
@@ -114,7 +157,7 @@ class LLMSampleScorer:
         if metric_name not in METRICS:
             raise KeyError(f"Unknown metric '{metric_name}'. Available: {sorted(METRICS)}")
         self.cache = cache
-        self.metric = METRICS[metric_name]
+        self.metric_name = metric_name
 
     def score(self, pool: Dataset) -> dict[str, float]:
         from .data import sentence_key
@@ -124,7 +167,7 @@ class LLMSampleScorer:
             key = sentence_key(example)
             if key not in self.cache:
                 raise KeyError(f"No cached LLM samples for '{key}'; run score-pool first.")
-            scores[key] = self.metric(self.cache[key]["parsed_samples"])
+            scores[key] = compute_metric(self.metric_name, self.cache[key])
         return scores
 
 

@@ -19,7 +19,17 @@ from scipy.stats import spearmanr
 
 from .config import ExperimentConfig, load_config
 from .llm_scoring import load_cache
-from .uncertainty import METRICS, majority_vote
+from .uncertainty import METRICS, compute_metric, majority_vote
+
+
+def _strategy_label(strategy: str) -> str:
+    """Human label with the metric's box type, e.g. 'UQ[white]: predictive_entropy'."""
+    if not strategy.startswith("uncertainty:"):
+        return strategy
+    name = strategy.split(":", 1)[1]
+    if name in METRICS:
+        return f"UQ[{METRICS[name].box}]: {name}"
+    return f"UQ: {name}"
 
 
 def load_runs(records_path: Path) -> list[dict]:
@@ -47,8 +57,7 @@ def plot_learning_curves(runs: list[dict], out_path) -> None:
             means.append(np.mean(f1s) if f1s else np.nan)
             stds.append(np.std(f1s) if f1s else np.nan)
         means, stds = np.array(means), np.array(stds)
-        label = strategy.replace("uncertainty:", "UQ: ")
-        ax.plot(budgets, means, marker="o", label=label)
+        ax.plot(budgets, means, marker="o", label=_strategy_label(strategy))
         ax.fill_between(budgets, means - stds, means + stds, alpha=0.15)
 
     full_runs = [r for (b, s), rs in groups.items() if s == "full" for r in rs]
@@ -115,14 +124,24 @@ def plot_uncertainty_vs_error(cache: dict[str, dict], out_path) -> dict[str, flo
         gt = record["gt_tags"]
         error_rates.append(sum(p != g for p, g in zip(prediction, gt)) / len(gt))
 
+    # White-box metrics need token_entropies in the cache (mlx backend only).
+    has_entropies = all(cache[k].get("token_entropies") for k in keys)
+    names = [
+        name for name, metric in sorted(METRICS.items())
+        if metric.box != "white" or has_entropies
+    ]
+    skipped = sorted(set(METRICS) - set(names))
+    if skipped:
+        print(f"Skipping white-box metrics (no token_entropies in cache): {skipped}")
+
     correlations = {}
-    fig, axes = plt.subplots(1, len(METRICS), figsize=(4 * len(METRICS), 4), sharey=True)
-    for ax, (name, fn) in zip(np.atleast_1d(axes), sorted(METRICS.items())):
-        scores = [fn(cache[k]["parsed_samples"]) for k in keys]
+    fig, axes = plt.subplots(1, len(names), figsize=(4 * len(names), 4), sharey=True)
+    for ax, name in zip(np.atleast_1d(axes), names):
+        scores = [compute_metric(name, cache[k]) for k in keys]
         rho, _ = spearmanr(scores, error_rates)
         correlations[name] = float(rho)
         ax.scatter(scores, error_rates, s=8, alpha=0.4)
-        ax.set_title(f"{name}\nSpearman ρ={rho:.3f}")
+        ax.set_title(f"{name} [{METRICS[name].box}]\nSpearman ρ={rho:.3f}")
         ax.set_xlabel("uncertainty")
     np.atleast_1d(axes)[0].set_ylabel("LLM majority-vote error rate")
     fig.tight_layout()

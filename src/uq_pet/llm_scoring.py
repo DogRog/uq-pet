@@ -2,10 +2,13 @@
 
 Cache format (`data/processed/llm_scores/<model>_k<K>_t<temp>_seed<seed>.jsonl`):
 line 0 is a header record describing the config; every other line is one
-sentence record with the raw responses and parsed tag sequences. Metrics are
-never stored — they are recomputed from `parsed_samples`, so budgets, metrics
-and repeats can be swept without new API calls. Existing keys are skipped on
-rerun, so an interrupted pass resumes where it left off.
+sentence record with the raw responses and parsed tag sequences. Records from
+the "mlx" backend additionally carry `token_entropies` (per-sample lists of
+per-token predictive entropies in bits) for white-box metrics, and the header
+carries `backend: mlx`. Metrics are never stored — they are recomputed from
+the cached fields, so budgets, metrics and repeats can be swept without new
+generation. Existing keys are skipped on rerun, so an interrupted pass resumes
+where it left off.
 """
 
 import asyncio
@@ -150,6 +153,8 @@ async def score_pool(cfg: LLMScoreConfig, pool: Dataset, limit: int | None = Non
         "prompt_fingerprint": prompt_fingerprint(few_shot_tokens, few_shot_tags),
         "dataset_url": NER_DATASET_URL,
     }
+    if cfg.backend != "openrouter":
+        header["backend"] = cfg.backend
 
     cache_path = cfg.cache_path()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -163,6 +168,11 @@ async def score_pool(cfg: LLMScoreConfig, pool: Dataset, limit: int | None = Non
         examples = examples[:limit]
     pending = [ex for ex in examples if sentence_key(ex) not in cache]
     print(f"Scoring pool: {len(pending)} to score, {len(cache)} cached ({cache_path})")
+
+    if cfg.backend == "mlx":
+        with open(cache_path, "a") as f:
+            _score_pending_mlx(cfg, pending, few_shot_tokens, few_shot_tags, cache, f)
+        return cache
 
     client = make_client()
     semaphore = asyncio.Semaphore(cfg.max_concurrency)
@@ -198,3 +208,37 @@ async def score_pool(cfg: LLMScoreConfig, pool: Dataset, limit: int | None = Non
         await asyncio.gather(*[score_sentence(ex, f) for ex in pending])
 
     return cache
+
+
+def _score_pending_mlx(cfg: LLMScoreConfig, pending: list, few_shot_tokens: list,
+                       few_shot_tags: list, cache: dict, f) -> None:
+    """Sequential in-process scoring (single GPU — no concurrency to exploit)."""
+    from .mlx_scoring import MLXGenerator, derive_sample_seed
+
+    generator = MLXGenerator(cfg.model)
+    for example in pending:
+        key = sentence_key(example)
+        tokens = example["tokens"]
+        prompt = build_ner_prompt(tokens, few_shot_tokens, few_shot_tags)
+        raw, entropies = [], []
+        for i in range(cfg.num_samples):
+            text, sample_entropies = generator.sample(
+                prompt, cfg.temperature, cfg.max_tokens,
+                seed=derive_sample_seed(cfg.seed, key, i),
+            )
+            raw.append(text)
+            entropies.append(sample_entropies)
+        record = {
+            "key": key,
+            "document": example["document name"],
+            "sentence_id": example["sentence-ID"],
+            "tokens": tokens,
+            "gt_tags": tag_ids_to_labels(example["ner-tags"]),
+            "raw_responses": raw,
+            "parsed_samples": [parse_ner_output(r, tokens) for r in raw],
+            "token_entropies": entropies,
+        }
+        f.write(json.dumps(record) + "\n")
+        f.flush()
+        cache[key] = record
+        print(f"Scored {len(cache)} total ({key})")
