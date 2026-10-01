@@ -2,6 +2,9 @@
 
 Is **LLM uncertainty quantification a good criterion for choosing training data**, compared to random choice? This repo runs that experiment on the [PET dataset](https://github.com/patriziobellan86/PETv1.1) (process-extraction NER, 417 sentences, 15 BIO tags).
 
+The token-level counterpart, which acquires individual uncertain words for a BERT-style
+tagger instead of whole sentences, lives in [DogRog/uq-pet-token](https://github.com/DogRog/uq-pet-token).
+
 ## Experiment design
 
 ```text
